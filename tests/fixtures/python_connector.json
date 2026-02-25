@@ -1,0 +1,20 @@
+{
+  "runtime": {
+    "language": "python",
+    "entryPoint": "runner_entrypoint.py",
+    "timeoutMs": 30000,
+    "memoryMb": 256,
+    "dependencies": {
+      "requests": "2.32.3"
+    }
+  },
+  "configuration": {
+    "spreadsheetId": "abc123",
+    "sheetName": "Sheet1",
+    "columnIndex": 3,
+    "valueToInsert": "VALUE_DEFINED_AT_CREATION"
+  },
+  "files": {
+    "runner_entrypoint.py": "import json\n\nwith open('/run/connector.json', 'r', encoding='utf-8') as f:\n    connector = json.load(f)\n\ncfg = connector['configuration']\nresult = {\n    'spreadsheetId': cfg['spreadsheetId'],\n    'sheetName': cfg['sheetName'],\n    'columnIndex': cfg['columnIndex'],\n    'columnLetter': 'C'\n}\nprint(json.dumps({'ok': True, 'result': result}))\n"
+  }
+}

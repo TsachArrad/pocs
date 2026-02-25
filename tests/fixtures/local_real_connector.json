@@ -1,0 +1,14 @@
+{
+  "runtime": {
+    "language": "python",
+    "entryPoint": "runner_entrypoint.py",
+    "timeoutMs": 15000,
+    "memoryMb": 128
+  },
+  "configuration": {
+    "name": "integration-test"
+  },
+  "files": {
+    "runner_entrypoint.py": "import json\nimport os\n\nwith open('/run/connector.json', 'r', encoding='utf-8') as f:\n    connector = json.load(f)\n\nconfigured_name = connector['configuration']['name']\nresult = {\n    'ok': True,\n    'result': {\n        'message': f\"hello-{os.getenv('TEST_SUFFIX', 'world')}\",\n        'name': configured_name,\n    },\n}\nprint(json.dumps(result))"
+  }
+}

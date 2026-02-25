@@ -1,0 +1,67 @@
+{
+  "schemaVersion": "1.0",
+  "connectorType": "monday_create_item_dynamic_typed_config",
+  "displayName": "monday.com - Create Item (Dynamic, Typed Configuration)",
+  "description": "Creates a monday.com item. Each run provides configuration (boardName + columnValuesByTitle). Types for each configuration field are declared in configurationTypes.",
+  "runtime": {
+    "language": "python",
+    "pythonVersion": "3.12",
+    "entryPoint": "runner_entrypoint.py",
+    "timeoutMs": 60000,
+    "memoryMb": 256,
+    "dependencies": [
+      { "name": "requests", "version": "2.32.3" }
+    ]
+  },
+  "auth": {
+    "type": "monday_api_token",
+    "apiBaseUrl": "https://api.monday.com/v2",
+    "token": "{{env:MONDAY_API_TOKEN}}"
+  },
+  "configuration": {
+    "boardName": "BOARD_NAME_PROVIDED_AT_RUNTIME",
+    "itemName": "ITEM_NAME_OPTIONAL_AT_RUNTIME",
+    "columnValuesByTitle": {
+      "COLUMN_TITLE": "STRING_VALUE"
+    }
+  },
+  "configurationTypes": {
+    "boardName": {
+      "type": "string",
+      "required": true,
+      "description": "monday board name to target (matched case-insensitively)."
+    },
+    "itemName": {
+      "type": "string",
+      "required": false,
+      "description": "Item name in monday. If omitted, defaults to 'Auto Item'."
+    },
+    "columnValuesByTitle": {
+      "type": "dictionary",
+      "required": true,
+      "keyType": "string",
+      "valueType": "string",
+      "description": "Mapping of monday column TITLE -> value (string). Keys must match column titles on the board."
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "boardId": { "type": "number" },
+      "boardName": { "type": "string" },
+      "itemId": { "type": "number" },
+      "itemName": { "type": "string" },
+      "usedColumns": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    },
+    "required": ["boardId", "boardName", "itemId", "itemName"]
+  },
+  "files": {
+    "runner_entrypoint.py": "import json, os, pathlib, importlib.util\n\n\ndef _parse_json(name, s):\n    try:\n        return json.loads(s)\n    except Exception as e:\n        raise RuntimeError(f\"Invalid {name}: {e}\")\n\n\ndef _resolve_placeholders(node):\n    import re\n    if node is None:\n        return None\n    if isinstance(node, str):\n        def repl(m):\n            key = m.group(1)\n            if key not in os.environ:\n                raise RuntimeError(f\"Missing env var: {key}\")\n            return os.environ[key]\n        return re.sub(r\"\\{\\{env:([A-Z0-9_]+)\\}\\}\", repl, node)\n    if isinstance(node, list):\n        return [_resolve_placeholders(x) for x in node]\n    if isinstance(node, dict):\n        return {k: _resolve_placeholders(v) for k, v in node.items()}\n    return node\n\n\ndef _write_files(code_dir, files):\n    code_dir.mkdir(parents=True, exist_ok=True)\n    for fname, content in (files or {}).items():\n        (code_dir / fname).write_text(content, encoding='utf-8')\n\n\ndef _import_module(file_path):\n    spec = importlib.util.spec_from_file_location('step_module', str(file_path))\n    if spec is None or spec.loader is None:\n        raise RuntimeError(f\"Cannot load module from {file_path}\")\n    mod = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(mod)\n    return mod\n\n\ndef _load_input_json():\n    raw = os.environ.get('INPUT_JSON')\n    if not raw:\n        p = pathlib.Path('/run/input.json')\n        if p.exists():\n            raw = p.read_text(encoding='utf-8')\n    if not raw:\n        # For this connector we allow running with configuration already baked into connector.json\n        return {}\n    return _parse_json('INPUT_JSON', raw)\n\n\ndef _validate_configuration_types(connector, input_overrides):\n    # Merge runtime overrides into configuration (if provided)\n    cfg = dict(connector.get('configuration') or {})\n    if isinstance(input_overrides, dict) and input_overrides:\n        for k, v in input_overrides.items():\n            cfg[k] = v\n\n    types = connector.get('configurationTypes') or {}\n\n    def err(msg):\n        raise RuntimeError(f\"Configuration type validation failed: {msg}\")\n\n    for field, spec in types.items():\n        required = bool(spec.get('required'))\n        ftype = spec.get('type')\n\n        if required and field not in cfg:\n            err(f\"missing required field '{field}'\")\n\n        if field not in cfg:\n            continue\n\n        val = cfg[field]\n\n        if ftype == 'string':\n            if not isinstance(val, str):\n                err(f\"field '{field}' must be string\")\n\n        elif ftype == 'dictionary':\n            if not isinstance(val, dict):\n                err(f\"field '{field}' must be dictionary\")\n            key_t = spec.get('keyType', 'string')\n            val_t = spec.get('valueType', 'string')\n            for kk, vv in val.items():\n                if key_t == 'string' and not isinstance(kk, str):\n                    err(f\"field '{field}' has non-string key\")\n                if val_t == 'string' and not isinstance(vv, str):\n                    err(f\"field '{field}' value for key '{kk}' must be string\")\n\n        else:\n            err(f\"unsupported type '{ftype}' for field '{field}'\")\n\n    return cfg\n\n\ndef main():\n    raw = os.environ.get('CONNECTOR_JSON')\n    if not raw:\n        p = pathlib.Path('/run/connector.json')\n        if p.exists():\n            raw = p.read_text(encoding='utf-8')\n    if not raw:\n        raise RuntimeError('CONNECTOR_JSON or /run/connector.json is required')\n\n    connector = _parse_json('CONNECTOR_JSON', raw)\n    resolved = _resolve_placeholders(connector)\n\n    code_dir = pathlib.Path('/run/code')\n    _write_files(code_dir, resolved.get('files'))\n\n    input_obj = _load_input_json()\n\n    # Allow passing configuration overrides via INPUT_JSON under key 'configuration'\n    cfg_overrides = input_obj.get('configuration') if isinstance(input_obj, dict) else None\n    cfg = _validate_configuration_types(resolved, cfg_overrides or {})\n\n    # Put merged/validated config back into connector for step usage\n    resolved['configuration'] = cfg\n\n    context = {\n        'connector': resolved,\n        'log': {\n            'info': lambda *a: print(*a),\n            'warn': lambda *a: print(*a),\n            'error': lambda *a: print(*a)\n        }\n    }\n\n    mod = _import_module(code_dir / 'step.py')\n    if not hasattr(mod, 'run'):\n        raise RuntimeError('step.py must define run(input, context)')\n\n    result = mod.run(input_obj, context)\n    print(json.dumps({'ok': True, 'result': result}, indent=2, ensure_ascii=False))\n\n\nif __name__ == '__main__':\n    try:\n        main()\n    except Exception as e:\n        print(json.dumps({'ok': False, 'error': str(e)}, indent=2, ensure_ascii=False))\n        raise\n",
+    "step.py": "import json\nimport requests\n\n\ndef _gql(endpoint, token, query, variables=None):\n    headers = {\n        'Authorization': token,\n        'Content-Type': 'application/json'\n    }\n    payload = {\n        'query': query,\n        'variables': variables or {}\n    }\n    r = requests.post(endpoint, headers=headers, data=json.dumps(payload), timeout=30)\n    txt = r.text\n    if not r.ok:\n        raise RuntimeError(f\"monday GraphQL HTTP error: {r.status_code} {txt}\")\n    data = r.json()\n    if 'errors' in data and data['errors']:\n        raise RuntimeError(f\"monday GraphQL errors: {json.dumps(data['errors'], ensure_ascii=False)}\")\n    return data.get('data')\n\n\ndef _find_board_id_by_name(endpoint, token, board_name):\n    q = \"\"\"\n    query ($limit: Int!) {\n      boards(limit: $limit) { id name }\n    }\n    \"\"\"\n    d = _gql(endpoint, token, q, { 'limit': 100 })\n    for b in (d.get('boards') or []):\n        if (b.get('name') or '').strip().lower() == board_name.strip().lower():\n            return int(b['id']), b.get('name') or board_name\n    raise RuntimeError(f\"Board not found by name (searched first 100): {board_name}\")\n\n\ndef _get_columns(endpoint, token, board_id):\n    q = \"\"\"\n    query ($id: [ID!]) {\n      boards(ids: $id) {\n        id\n        name\n        columns { id title type }\n      }\n    }\n    \"\"\"\n    d = _gql(endpoint, token, q, { 'id': [str(board_id)] })\n    boards = d.get('boards') or []\n    if not boards:\n        raise RuntimeError(f\"Board id not found: {board_id}\")\n    b = boards[0]\n    cols = b.get('columns') or []\n    by_title = { (c.get('title') or '').strip().lower(): c for c in cols }\n    return b.get('name') or '', by_title\n\n\ndef _create_item(endpoint, token, board_id, item_name, column_values_dict):\n    m = \"\"\"\n    mutation ($board: ID!, $name: String!, $colVals: JSON!) {\n      create_item(board_id: $board, item_name: $name, column_values: $colVals) {\n        id\n        name\n      }\n    }\n    \"\"\"\n    variables = {\n        'board': str(board_id),\n        'name': item_name,\n        'colVals': json.dumps(column_values_dict, ensure_ascii=False)\n    }\n    d = _gql(endpoint, token, m, variables)\n    item = d.get('create_item')\n    return int(item['id']), item.get('name') or item_name\n\n\ndef run(input_obj, context):\n    # Uses ONLY context['connector'] which already contains merged/validated configuration.\n    connector = context['connector']\n    auth = connector.get('auth', {})\n    cfg = connector.get('configuration', {})\n\n    endpoint = auth.get('apiBaseUrl')\n    token = auth.get('token')\n    if not endpoint:\n        raise RuntimeError('Missing auth.apiBaseUrl')\n    if not token:\n        raise RuntimeError('Missing auth.token')\n\n    board_name = cfg.get('boardName')\n    if not board_name:\n        raise RuntimeError('Missing configuration.boardName')\n\n    item_name = cfg.get('itemName')\n    if not item_name or not isinstance(item_name, str) or not item_name.strip():\n        item_name = 'Auto Item'\n\n    values_by_title = cfg.get('columnValuesByTitle') or {}\n    if not isinstance(values_by_title, dict):\n        raise RuntimeError('configuration.columnValuesByTitle must be a dictionary')\n\n    # Ensure all values are strings\n    for k, v in values_by_title.items():\n        if not isinstance(k, str):\n            raise RuntimeError('columnValuesByTitle keys must be strings')\n        if not isinstance(v, str):\n            raise RuntimeError(f\"columnValuesByTitle value for key '{k}' must be string\")\n\n    board_id, resolved_board_name = _find_board_id_by_name(endpoint, token, board_name)\n    _, cols_by_title = _get_columns(endpoint, token, board_id)\n\n    # Map title -> column_id\n    col_values = {}\n    used_columns = []\n    for title, value in values_by_title.items():\n        col = cols_by_title.get(title.strip().lower())\n        if not col:\n            if connector.get('configuration', {}).get('strictColumnMatch', True):\n                raise RuntimeError(f\"Column not found on board '{resolved_board_name}': '{title}'\")\n            else:\n                continue\n        col_id = col.get('id')\n        col_values[col_id] = value\n        used_columns.append(title)\n\n    item_id, created_name = _create_item(endpoint, token, board_id, item_name, col_values)\n\n    return {\n        'boardId': board_id,\n        'boardName': resolved_board_name,\n        'itemId': item_id,\n        'itemName': created_name,\n        'usedColumns': used_columns\n    }\n"
+  },
+  "version": "1.0.0",
+  "notes": "configurationTypes describes the type of each field under configuration. Runner validates configuration (and optional runtime overrides via INPUT_JSON.configuration) before executing step.py."
+}

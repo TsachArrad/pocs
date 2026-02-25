@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "1.0",
+  "connectorType": "google_sheets_append_to_configured_column",
+  "displayName": "Google Sheets - Append to Configured Column",
+  "description": "Connector template with embedded code.",
+  "auth": {
+    "type": "oauth2_refresh",
+    "tokenEndpoint": "https://oauth2.googleapis.com/token",
+    "clientId": "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "clientSecret": "YOUR_GOOGLE_OAUTH_CLIENT_SECRET",
+    "refreshToken": "YOUR_GOOGLE_OAUTH_REFRESH_TOKEN",
+    "scopes": [
+      "https://www.googleapis.com/auth/spreadsheets"
+    ]
+  },
+  "configuration": {
+    "spreadsheetId": "1piM7f0JRhkydfvpxdVYk1Yld6ddj0Tjgl7QtFnyDzLs",
+    "sheetName": "Sheet2",
+    "columnIndex": 3,
+    "valueToInsert": "VALUE_DEFINED_AT_CREATION",
+    "valueInputOption": "USER_ENTERED",
+    "insertDataOption": "INSERT_ROWS"
+  },
+  "runtime": {
+    "language": "nodejs",
+    "entryPoint": "runner-entrypoint.js",
+    "timeoutMs": 30000,
+    "memoryMb": 256
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "spreadsheetId": {
+        "type": "string"
+      },
+      "sheetName": {
+        "type": "string"
+      },
+      "columnIndex": {
+        "type": "number"
+      },
+      "columnLetter": {
+        "type": "string"
+      },
+      "updatedCell": {
+        "type": "string"
+      },
+      "updatedRow": {
+        "type": "number"
+      },
+      "updatedRange": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "spreadsheetId",
+      "sheetName",
+      "columnIndex",
+      "columnLetter"
+    ]
+  },
+  "files": {
+    "runner-entrypoint.js": "import fs from 'fs';\nimport path from 'path';\n\nfunction mustParseJson(name, s){\n  try { return JSON.parse(s); } catch(e){ throw new Error(`Invalid ${name}: ${e.message}`); }\n}\n\nfunction resolvePlaceholders(node){\n  if (node === null || node === undefined) return node;\n  if (typeof node === 'string'){\n    return node.replace(/\\{\\{env:([A-Z0-9_]+)\\}\\}/g, (_, key) => {\n      const v = process.env[key];\n      if (v === undefined) throw new Error(`Missing env var: ${key}`);\n      return v;\n    });\n  }\n  if (Array.isArray(node)) return node.map(resolvePlaceholders);\n  if (typeof node === 'object'){\n    const out = {};\n    for (const [k,v] of Object.entries(node)) out[k] = resolvePlaceholders(v);\n    return out;\n  }\n  return node;\n}\n\nasync function main(){\n  const connectorRaw = process.env.CONNECTOR_JSON || (fs.existsSync('/run/connector.json') ? fs.readFileSync('/run/connector.json','utf8') : null);\n  if (!connectorRaw) throw new Error('CONNECTOR_JSON or /run/connector.json required');\n\n  const connector = mustParseJson('CONNECTOR_JSON', connectorRaw);\n  const resolved = resolvePlaceholders(connector);\n\n  const codeDir = '/run/code';\n  fs.mkdirSync(codeDir, { recursive: true });\n  for (const [fname, content] of Object.entries(resolved.files || {})){\n    fs.writeFileSync(path.join(codeDir, fname), content, 'utf8');\n  }\n\n  const context = {\n    connector: resolved,\n    auth: {\n      async getAccessToken(){\n        const auth = resolved.auth;\n        if (!auth) throw new Error('Connector missing auth');\n        if (auth.type !== 'oauth2_refresh') throw new Error('Unsupported auth.type');\n\n        const params = new URLSearchParams({\n          grant_type: 'refresh_token',\n          client_id: auth.clientId,\n          client_secret: auth.clientSecret,\n          refresh_token: auth.refreshToken\n        });\n\n        const res = await fetch(auth.tokenEndpoint, {\n          method: 'POST',\n          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n          body: params\n        });\n\n        const txt = await res.text();\n        if (!res.ok) throw new Error(`Token refresh failed: ${res.status} ${txt}`);\n        const j = txt ? JSON.parse(txt) : {};\n        if (!j.access_token) throw new Error('Token response missing access_token');\n        return j.access_token;\n      }\n    },\n    log: {\n      info: (...a) => console.log(...a),\n      warn: (...a) => console.warn(...a),\n      error: (...a) => console.error(...a)\n    }\n  };\n\n  const stepPath = 'file://' + path.join(codeDir, 'step.js');\n  const mod = await import(stepPath);\n  if (!mod?.default) throw new Error('step.js must export default function');\n\n  const result = await mod.default({}, context);\n  process.stdout.write(JSON.stringify({ ok: true, result }, null, 2));\n}\n\nmain().catch(e => {\n  process.stderr.write(JSON.stringify({ ok: false, error: e.message }, null, 2));\n  process.exit(1);\n});\n",
+    "step.js": "function escapeA1(title){\n  if (/[^A-Za-z0-9_]/.test(title)) return `'${title.replace(/'/g, \"''\")}'`;\n  return title;\n}\n\nfunction columnIndexToLetter(n){\n  if (!Number.isInteger(n) || n < 1) throw new Error('columnIndex must be an integer >= 1');\n  let s = '';\n  while (n > 0){\n    const m = (n - 1) % 26;\n    s = String.fromCharCode(65 + m) + s;\n    n = Math.floor((n - 1) / 26);\n  }\n  return s;\n}\n\nexport default async function run(_input, context){\n  const cfg = context.connector.configuration || {};\n\n  const spreadsheetId = cfg.spreadsheetId;\n  const sheetName = cfg.sheetName;\n  const columnIndex = cfg.columnIndex;\n  const valueToInsert = cfg.valueToInsert;\n  const valueInputOption = cfg.valueInputOption || 'USER_ENTERED';\n  const insertDataOption = cfg.insertDataOption || 'INSERT_ROWS';\n\n  if (!spreadsheetId) throw new Error('Missing configuration.spreadsheetId');\n  if (!sheetName) throw new Error('Missing configuration.sheetName');\n  if (valueToInsert === undefined || valueToInsert === null) throw new Error('Missing configuration.valueToInsert');\n\n  const colLetter = columnIndexToLetter(columnIndex || 3);\n  const a1Sheet = escapeA1(sheetName);\n\n  const accessToken = await context.auth.getAccessToken();\n  const headers = {\n    Authorization: `Bearer ${accessToken}`,\n    'Content-Type': 'application/json'\n  };\n\n  const range = `${a1Sheet}!${colLetter}:${colLetter}`;\n  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:append?valueInputOption=${encodeURIComponent(valueInputOption)}&insertDataOption=${encodeURIComponent(insertDataOption)}`;\n\n  const res = await fetch(url, {\n    method: 'POST',\n    headers,\n    body: JSON.stringify({ values: [[String(valueToInsert)]] })\n  });\n\n  const txt = await res.text();\n  if (!res.ok) throw new Error(`Append failed: ${res.status} ${txt}`);\n\n  const json = txt ? JSON.parse(txt) : {};\n  const updatedRange = json?.updates?.updatedRange || null;\n\n  let updatedRow = null;\n  if (updatedRange){\n    const re = new RegExp(`!${colLetter}(\\\\d+):${colLetter}\\\\d+`);\n    const m = updatedRange.match(re);\n    if (m) updatedRow = Number(m[1]);\n  }\n\n  return {\n    spreadsheetId,\n    sheetName,\n    columnIndex: (columnIndex || 3),\n    columnLetter: colLetter,\n    updatedCell: updatedRow ? `${sheetName}!${colLetter}${updatedRow}` : null,\n    updatedRow,\n    updatedRange\n  };\n}\n"
+  },
+  "version": "1.0.0",
+  "notes": "All operational parameters are set at connector creation time."
+}
