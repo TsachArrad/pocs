@@ -1,0 +1,172 @@
+{
+  "connectorType": "monday.addItem",
+  "displayName": "Monday - Add Item to Board",
+  "description": "Adds an item (row) to a Monday.com board at runtime. Accepts simple values per column and performs needed transformations to Monday-native formats (status/date/people/tags/etc.). Validates against board columns before submission.",
+  "auth": {
+    "type": "bearer",
+    "fields": {
+      "token": {
+        "displayName": "Monday API Token",
+        "type": "string",
+        "required": true,
+        "secret": true,
+        "description": "Runtime may inject token either as auth.fields.token.value or auth.token."
+      }
+    }
+  },
+  "configuration": {
+    "board": {
+      "boardId": 0,
+      "groupId": null
+    },
+    "item": {
+      "name": ""
+    },
+    "columns": [
+      {
+        "columnId": "",
+        "columnType": "",
+        "required": false,
+        "value": null,
+        "onTypeMismatch": "error"
+      }
+    ],
+    "validation": {
+      "enabled": true,
+      "validateColumnExists": true,
+      "validateTypeMatches": true,
+      "unknownColumnsPolicy": "error"
+    },
+    "runtime": {
+      "allowPartialWrite": false,
+      "dryRun": false
+    }
+  },
+  "configurationTypes": {
+    "board.boardId": {
+      "type": "number",
+      "required": true
+    },
+    "board.groupId": {
+      "type": "string",
+      "required": false
+    },
+    "item.name": {
+      "type": "string",
+      "required": true
+    },
+    "columns": {
+      "type": "array",
+      "required": true
+    },
+    "columns[].columnId": {
+      "type": "string",
+      "required": true
+    },
+    "columns[].columnType": {
+      "type": "string",
+      "required": false
+    },
+    "columns[].value": {
+      "type": [
+        "string",
+        "number",
+        "object",
+        "array",
+        "boolean",
+        "null"
+      ],
+      "required": true
+    },
+    "runtime.dryRun": {
+      "type": "boolean",
+      "required": false
+    },
+    "runtime.allowPartialWrite": {
+      "type": "boolean",
+      "required": false
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": {
+        "type": "boolean"
+      },
+      "boardId": {
+        "type": [
+          "number",
+          "null"
+        ]
+      },
+      "groupId": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "itemId": {
+        "type": [
+          "number",
+          "null"
+        ]
+      },
+      "itemUrl": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "appliedColumns": {
+        "type": "array"
+      },
+      "errors": {
+        "type": "array"
+      },
+      "dryRun": {
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "columnValuesPreview": {
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "deferredActions": {
+        "type": [
+          "array",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "success",
+      "boardId",
+      "appliedColumns",
+      "errors"
+    ]
+  },
+  "files": {
+    "requirements.txt": {
+      "content": "requests==2.32.3\n"
+    },
+    "app/__init__.py": {
+      "content": ""
+    },
+    "app/main.py": {
+      "content": "from typing import Any, Dict\nfrom app.runner import run\n\n# KATA entrypoint: receives the full connector JSON object\ndef main(connector_json: Dict[str, Any]) -> Dict[str, Any]:\n    return run(connector_json)\n"
+    },
+    "app/runner.py": {
+      "content": "from typing import Any, Dict, List, Optional, Tuple\nfrom app.monday_client import MondayClient, MondayError\nfrom app.transforms import validate_and_transform\n\n\ndef _extract_token(connector_json: Dict[str, Any]) -> Optional[str]:\n    auth = connector_json.get(\"auth\") or {}\n    # pattern A: auth.fields.token.value\n    token = (((auth.get(\"fields\") or {}).get(\"token\") or {}).get(\"value\"))\n    # pattern B: auth.token\n    if not token:\n        token = auth.get(\"token\")\n    return token\n\n\ndef run(connector_json: Dict[str, Any]) -> Dict[str, Any]:\n    token = _extract_token(connector_json)\n    if not token:\n        return {\n            \"success\": False,\n            \"boardId\": None,\n            \"groupId\": None,\n            \"itemId\": None,\n            \"itemUrl\": None,\n            \"appliedColumns\": [],\n            \"errors\": [{\"code\": \"NO_TOKEN\", \"message\": \"Missing auth token\", \"path\": \"auth\"}],\n        }\n\n    cfg = connector_json.get(\"configuration\") or {}\n    board_cfg = cfg.get(\"board\") or {}\n    item_cfg = cfg.get(\"item\") or {}\n    cols_cfg: List[Dict[str, Any]] = cfg.get(\"columns\") or []\n    validation_cfg: Dict[str, Any] = cfg.get(\"validation\") or {}\n    runtime_cfg: Dict[str, Any] = cfg.get(\"runtime\") or {}\n\n    board_id = board_cfg.get(\"boardId\")\n    group_id = board_cfg.get(\"groupId\")\n    item_name = item_cfg.get(\"name\")\n\n    if not board_id:\n        return {\n            \"success\": False,\n            \"boardId\": None,\n            \"groupId\": group_id,\n            \"itemId\": None,\n            \"itemUrl\": None,\n            \"appliedColumns\": [],\n            \"errors\": [{\"code\": \"NO_BOARD\", \"message\": \"Missing configuration.board.boardId\", \"path\": \"configuration.board.boardId\"}],\n        }\n    if not item_name:\n        return {\n            \"success\": False,\n            \"boardId\": int(board_id),\n            \"groupId\": group_id,\n            \"itemId\": None,\n            \"itemUrl\": None,\n            \"appliedColumns\": [],\n            \"errors\": [{\"code\": \"NO_ITEM_NAME\", \"message\": \"Missing configuration.item.name\", \"path\": \"configuration.item.name\"}],\n        }\n\n    allow_partial = bool(runtime_cfg.get(\"allowPartialWrite\", False))\n    dry_run = bool(runtime_cfg.get(\"dryRun\", False))\n\n    try:\n        client = MondayClient(token)\n\n        # Board columns + metadata for transforms (labels/users/tags)\n        board_cols = client.get_board_columns(board_id)\n        meta = client.get_board_transform_metadata(board_id)\n\n        applied_cols, errors, column_values, deferred = validate_and_transform(\n            cols_cfg=cols_cfg,\n            board_cols=board_cols,\n            meta=meta,\n            validation_cfg=validation_cfg,\n        )\n\n        if errors and not allow_partial:\n            return {\n                \"success\": False,\n                \"boardId\": int(board_id),\n                \"groupId\": group_id,\n                \"itemId\": None,\n                \"itemUrl\": None,\n                \"appliedColumns\": applied_cols,\n                \"errors\": errors,\n            }\n\n        if dry_run:\n            return {\n                \"success\": len(errors) == 0,\n                \"boardId\": int(board_id),\n                \"groupId\": group_id,\n                \"itemId\": None,\n                \"itemUrl\": None,\n                \"appliedColumns\": applied_cols,\n                \"errors\": errors,\n                \"dryRun\": True,\n                \"columnValuesPreview\": column_values,\n                \"deferredActions\": deferred,\n            }\n\n        created = client.create_item(\n            board_id=board_id,\n            group_id=group_id,\n            item_name=item_name,\n            column_values=column_values,\n        )\n\n        item_id = created.get(\"id\")\n        item_url = created.get(\"url\")\n\n        # Deferred actions hook (e.g. files) - not implemented by default\n        # You can extend here to upload and attach files after creation.\n        return {\n            \"success\": item_id is not None and (len(errors) == 0 or allow_partial),\n            \"boardId\": int(board_id),\n            \"groupId\": group_id,\n            \"itemId\": int(item_id) if item_id is not None else None,\n            \"itemUrl\": item_url,\n            \"appliedColumns\": applied_cols,\n            \"errors\": errors,\n        }\n\n    except MondayError as e:\n        return {\n            \"success\": False,\n            \"boardId\": int(board_id) if board_id else None,\n            \"groupId\": group_id,\n            \"itemId\": None,\n            \"itemUrl\": None,\n            \"appliedColumns\": [],\n            \"errors\": [{\"code\": \"MONDAY_API_ERROR\", \"message\": str(e), \"path\": None}],\n        }\n    except Exception as e:\n        return {\n            \"success\": False,\n            \"boardId\": int(board_id) if board_id else None,\n            \"groupId\": group_id,\n            \"itemId\": None,\n            \"itemUrl\": None,\n            \"appliedColumns\": [],\n            \"errors\": [{\"code\": \"RUNNER_ERROR\", \"message\": str(e), \"path\": None}],\n        }\n"
+    },
+    "app/monday_client.py": {
+      "content": "import json\nfrom typing import Any, Dict, Optional, Union, List\nimport requests\n\nMONDAY_API_URL = \"https://api.monday.com/v2\"\n\n\nclass MondayError(Exception):\n    pass\n\n\nclass MondayClient:\n    def __init__(self, token: str, timeout: int = 30):\n        self.token = token\n        self.timeout = timeout\n\n    def _gql(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:\n        payload: Dict[str, Any] = {\"query\": query}\n        if variables is not None:\n            payload[\"variables\"] = variables\n\n        resp = requests.post(\n            MONDAY_API_URL,\n            json=payload,\n            headers={\"Authorization\": self.token, \"Content-Type\": \"application/json\"},\n            timeout=self.timeout,\n        )\n        if resp.status_code >= 400:\n            raise MondayError(f\"HTTP {resp.status_code}: {resp.text}\")\n\n        data = resp.json()\n        if data.get(\"errors\"):\n            raise MondayError(json.dumps(data[\"errors\"], ensure_ascii=False))\n        if \"data\" not in data:\n            raise MondayError(f\"Unexpected response: {data}\")\n        return data[\"data\"]\n\n    def get_board_columns(self, board_id: Union[int, str]) -> Dict[str, Dict[str, Any]]:\n        query = \"\"\"\n        query ($boardId: [ID!]) {\n          boards(ids: $boardId) {\n            id\n            columns {\n              id\n              title\n              type\n              settings_str\n            }\n          }\n        }\n        \"\"\"\n        data = self._gql(query, {\"boardId\": str(board_id)})\n        boards = data.get(\"boards\") or []\n        if not boards:\n            raise MondayError(f\"Board not found: {board_id}\")\n        cols = boards[0].get(\"columns\") or []\n        return {c[\"id\"]: c for c in cols if c.get(\"id\")}\n\n    def get_board_transform_metadata(self, board_id: Union[int, str]) -> Dict[str, Any]:\n        # Includes column settings_str (labels/options), tags list, and users list for resolving emails -> IDs\n        query = \"\"\"\n        query ($boardId: [ID!]) {\n          boards(ids: $boardId) {\n            id\n            columns { id type settings_str }\n          }\n          tags { id name }\n          users { id name email }\n        }\n        \"\"\"\n        return self._gql(query, {\"boardId\": str(board_id)})\n\n    def create_item(\n        self,\n        board_id: Union[int, str],\n        group_id: Optional[str],\n        item_name: str,\n        column_values: Dict[str, Any],\n    ) -> Dict[str, Any]:\n        mutation = \"\"\"\n        mutation ($boardId: ID!, $groupId: String, $itemName: String!, $columnValues: JSON!) {\n          create_item(board_id: $boardId, group_id: $groupId, item_name: $itemName, column_values: $columnValues) {\n            id\n            url\n          }\n        }\n        \"\"\"\n        variables: Dict[str, Any] = {\n            \"boardId\": str(board_id),\n            \"groupId\": group_id,\n            \"itemName\": item_name,\n            # Monday JSON scalar often expects a JSON-encoded string\n            \"columnValues\": json.dumps(column_values, ensure_ascii=False),\n        }\n        data = self._gql(mutation, variables)\n        return data.get(\"create_item\") or {}\n"
+    },
+    "app/transforms.py": {
+      "content": "import json\nfrom datetime import datetime, timezone\nfrom typing import Any, Dict, List, Tuple, Optional\n\n\ndef _safe_json(s: Optional[str]) -> Dict[str, Any]:\n    if not s:\n        return {}\n    try:\n        return json.loads(s)\n    except Exception:\n        return {}\n\n\ndef _to_date_yyyy_mm_dd(v: Any) -> str:\n    # Accept 'YYYY-MM-DD' string as-is; accept unix seconds; accept datetime-like dict\n    if v is None:\n        raise ValueError(\"date is null\")\n    if isinstance(v, (int, float)):\n        dt = datetime.fromtimestamp(int(v), tz=timezone.utc)\n        return dt.strftime(\"%Y-%m-%d\")\n    s = str(v).strip()\n    # minimal validation\n    if len(s) >= 8:\n        return s[:10]\n    raise ValueError(f\"invalid date: {v}\")\n\n\ndef _extract_labels_from_settings(settings_str: Optional[str]) -> List[str]:\n    # For status/dropdown, settings_str often contains labels in JSON.\n    # Different column types have different shapes; we best-effort parse.\n    settings = _safe_json(settings_str)\n    labels: List[str] = []\n    # status: {\"labels\": {\"0\":\"Working on it\",\"1\":\"Done\",...}}\n    if isinstance(settings.get(\"labels\"), dict):\n        labels = [str(v) for _, v in sorted(settings[\"labels\"].items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0)]\n    # dropdown: {\"labels\": [{\"id\":1,\"name\":\"A\"}, ...]} or {\"labels\": {...}} depending\n    if not labels and isinstance(settings.get(\"labels\"), list):\n        labels = [str(x.get(\"name\")) for x in settings[\"labels\"] if isinstance(x, dict) and x.get(\"name\")]\n    return [x for x in labels if x]\n\n\ndef validate_and_transform(\n    cols_cfg: List[Dict[str, Any]],\n    board_cols: Dict[str, Dict[str, Any]],\n    meta: Dict[str, Any],\n    validation_cfg: Dict[str, Any],\n) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:\n    \"\"\"\n    Produces:\n      applied_cols: list of per-column outcomes\n      errors: list of fatal validation/transform errors\n      column_values: dict ready for Monday create_item column_values\n      deferred_actions: reserved for post-actions (e.g. files)\n    \"\"\"\n    enabled = bool((validation_cfg or {}).get(\"enabled\", True))\n    validate_exists = bool((validation_cfg or {}).get(\"validateColumnExists\", True))\n    validate_type = bool((validation_cfg or {}).get(\"validateTypeMatches\", True))\n    unknown_policy = (validation_cfg or {}).get(\"unknownColumnsPolicy\", \"error\").lower()\n\n    tags = meta.get(\"tags\") or []\n    users = meta.get(\"users\") or []\n    tag_name_to_id = {str(t.get(\"name\")): int(t.get(\"id\")) for t in tags if t.get(\"id\") is not None and t.get(\"name\") is not None}\n    email_to_user_id = {str(u.get(\"email\")).lower(): int(u.get(\"id\")) for u in users if u.get(\"id\") is not None and u.get(\"email\")}\n\n    applied_cols: List[Dict[str, Any]] = []\n    errors: List[Dict[str, Any]] = []\n    column_values: Dict[str, Any] = {}\n    deferred_actions: List[Dict[str, Any]] = []\n\n    for i, c in enumerate(cols_cfg or []):\n        col_id = c.get(\"columnId\")\n        cfg_type = (c.get(\"columnType\") or \"\").lower()\n        required = bool(c.get(\"required\", False))\n        on_mismatch = (c.get(\"onTypeMismatch\") or \"error\").lower()  # error|skip\n        incoming = c.get(\"value\")\n\n        if not col_id:\n            errors.append({\"code\": \"INVALID_CONFIG\", \"message\": \"Missing columnId\", \"path\": f\"configuration.columns[{i}].columnId\"})\n            continue\n\n        board_col = board_cols.get(col_id)\n        if enabled and validate_exists and not board_col:\n            msg = f\"Column '{col_id}' does not exist on board\"\n            if unknown_policy == \"skip\" and not required:\n                applied_cols.append({\"columnId\": col_id, \"columnType\": cfg_type, \"status\": \"skipped\", \"message\": msg})\n                continue\n            errors.append({\"code\": \"UNKNOWN_COLUMN\", \"message\": msg, \"path\": f\"configuration.columns[{i}]\"})\n            continue\n\n        board_type = ((board_col or {}).get(\"type\") or cfg_type or \"\").lower()\n\n        if enabled and validate_type and board_col and cfg_type and cfg_type != board_type:\n            msg = f\"Type mismatch for {col_id}: config={cfg_type} board={board_type}\"\n            if on_mismatch == \"skip\" and not required:\n                applied_cols.append({\"columnId\": col_id, \"columnType\": board_type, \"status\": \"skipped\", \"message\": msg})\n                continue\n            errors.append({\"code\": \"TYPE_MISMATCH\", \"message\": msg, \"path\": f\"configuration.columns[{i}]\"})\n            continue\n\n        if incoming is None:\n            applied_cols.append({\"columnId\": col_id, \"columnType\": board_type, \"status\": \"skipped\", \"message\": \"value is null\"})\n            continue\n\n        try:\n            transformed, status, msg, defer = _transform_one(\n                col_id=col_id,\n                board_col=board_col or {},\n                board_type=board_type,\n                incoming=incoming,\n                tag_name_to_id=tag_name_to_id,\n                email_to_user_id=email_to_user_id,\n            )\n            if status == \"applied\":\n                column_values[col_id] = transformed\n            if defer is not None:\n                deferred_actions.append(defer)\n            applied_cols.append({\"columnId\": col_id, \"columnType\": board_type, \"status\": status, \"message\": msg})\n        except Exception as e:\n            msg = f\"Transform failed: {e}\"\n            if required:\n                errors.append({\"code\": \"TRANSFORM_ERROR\", \"message\": msg, \"path\": f\"configuration.columns[{i}]\"})\n            else:\n                applied_cols.append({\"columnId\": col_id, \"columnType\": board_type, \"status\": \"skipped\", \"message\": msg})\n\n    return applied_cols, errors, column_values, deferred_actions\n\n\ndef _transform_one(\n    col_id: str,\n    board_col: Dict[str, Any],\n    board_type: str,\n    incoming: Any,\n    tag_name_to_id: Dict[str, int],\n    email_to_user_id: Dict[str, int],\n):\n    # If user already passes Monday-native object for complex types, pass-through\n    if isinstance(incoming, dict) and board_type not in (\"text\", \"numbers\"):\n        return incoming, \"applied\", None, None\n\n    # text\n    if board_type == \"text\":\n        return str(incoming), \"applied\", None, None\n\n    # long_text\n    if board_type == \"long_text\":\n        # Monday expects {\"text\": \"...\"} for long_text when using column_values JSON\n        return {\"text\": str(incoming)}, \"applied\", None, None\n\n    # numbers\n    if board_type == \"numbers\":\n        return str(incoming), \"applied\", None, None\n\n    # date\n    if board_type == \"date\":\n        return {\"date\": _to_date_yyyy_mm_dd(incoming)}, \"applied\", None, None\n\n    # timeline\n    if board_type == \"timeline\":\n        if isinstance(incoming, dict):\n            frm = incoming.get(\"from\") or incoming.get(\"start\")\n            to = incoming.get(\"to\") or incoming.get(\"end\")\n            if not frm:\n                raise ValueError(\"timeline.from is missing\")\n            out = {\"from\": _to_date_yyyy_mm_dd(frm)}\n            if to:\n                out[\"to\"] = _to_date_yyyy_mm_dd(to)\n            return out, \"applied\", None, None\n        if isinstance(incoming, (list, tuple)) and len(incoming) >= 1:\n            out = {\"from\": _to_date_yyyy_mm_dd(incoming[0])}\n            if len(incoming) >= 2 and incoming[1] is not None:\n                out[\"to\"] = _to_date_yyyy_mm_dd(incoming[1])\n            return out, \"applied\", None, None\n        raise ValueError(\"timeline expects {from,to} or [from,to]\")\n\n    # status\n    if board_type == \"status\":\n        if isinstance(incoming, (int, float)) or (isinstance(incoming, str) and incoming.strip().isdigit()):\n            return {\"index\": int(incoming)}, \"applied\", None, None\n        # Try validate label exists (best-effort)\n        labels = _extract_labels_from_settings((board_col or {}).get(\"settings_str\"))\n        label = str(incoming)\n        if labels and label not in labels:\n            # still send label; Monday may reject, but we keep behavior predictable\n            return {\"label\": label}, \"applied\", f\"Label '{label}' not found in board labels (sent anyway)\", None\n        return {\"label\": label}, \"applied\", None, None\n\n    # dropdown\n    if board_type == \"dropdown\":\n        if isinstance(incoming, list):\n            return {\"labels\": [str(x) for x in incoming]}, \"applied\", None, None\n        return {\"labels\": [str(incoming)]}, \"applied\", None, None\n\n    # checkbox\n    if board_type == \"checkbox\":\n        if isinstance(incoming, bool):\n            return {\"checked\": incoming}, \"applied\", None, None\n        s = str(incoming).strip().lower()\n        return {\"checked\": s in (\"1\", \"true\", \"yes\", \"checked\", \"on\")}, \"applied\", None, None\n\n    # email\n    if board_type == \"email\":\n        if isinstance(incoming, dict) and incoming.get(\"email\"):\n            return {\"email\": str(incoming.get(\"email\")), \"text\": str(incoming.get(\"text\") or incoming.get(\"email\"))}, \"applied\", None, None\n        s = str(incoming)\n        return {\"email\": s, \"text\": s}, \"applied\", None, None\n\n    # phone\n    if board_type == \"phone\":\n        if isinstance(incoming, dict) and incoming.get(\"phone\"):\n            out = {\"phone\": str(incoming.get(\"phone\"))}\n            if incoming.get(\"countryShortName\"):\n                out[\"countryShortName\"] = str(incoming.get(\"countryShortName\"))\n            return out, \"applied\", None, None\n        return {\"phone\": str(incoming), \"countryShortName\": \"IL\"}, \"applied\", None, None\n\n    # link\n    if board_type == \"link\":\n        if isinstance(incoming, dict) and incoming.get(\"url\"):\n            return {\"url\": str(incoming.get(\"url\")), \"text\": str(incoming.get(\"text\") or incoming.get(\"url\"))}, \"applied\", None, None\n        s = str(incoming)\n        return {\"url\": s, \"text\": s}, \"applied\", None, None\n\n    # people\n    if board_type == \"people\":\n        # accepts userId int, email string, list[int], list[dict]\n        if isinstance(incoming, int):\n            return {\"personsAndTeams\": [{\"id\": int(incoming), \"kind\": \"person\"}]}, \"applied\", None, None\n        if isinstance(incoming, list):\n            pat = []\n            for it in incoming:\n                if isinstance(it, int) or (isinstance(it, str) and it.isdigit()):\n                    pat.append({\"id\": int(it), \"kind\": \"person\"})\n                elif isinstance(it, dict) and it.get(\"id\") is not None:\n                    pat.append({\"id\": int(it[\"id\"]), \"kind\": str(it.get(\"kind\") or \"person\")})\n                elif isinstance(it, str):\n                    uid = email_to_user_id.get(it.lower())\n                    if uid is None:\n                        raise ValueError(f\"cannot resolve user email: {it}\")\n                    pat.append({\"id\": int(uid), \"kind\": \"person\"})\n                else:\n                    raise ValueError(f\"unsupported people entry: {it}\")\n            return {\"personsAndTeams\": pat}, \"applied\", None, None\n        s = str(incoming).strip()\n        if s.isdigit():\n            return {\"personsAndTeams\": [{\"id\": int(s), \"kind\": \"person\"}]}, \"applied\", None, None\n        uid = email_to_user_id.get(s.lower())\n        if uid is None:\n            raise ValueError(f\"cannot resolve person: {incoming}\")\n        return {\"personsAndTeams\": [{\"id\": int(uid), \"kind\": \"person\"}]}, \"applied\", None, None\n\n    # tags\n    if board_type == \"tags\":\n        if isinstance(incoming, list):\n            if all(isinstance(x, int) or (isinstance(x, str) and x.isdigit()) for x in incoming):\n                return {\"tag_ids\": [int(x) for x in incoming]}, \"applied\", None, None\n            resolved = [tag_name_to_id.get(str(x)) for x in incoming if tag_name_to_id.get(str(x)) is not None]\n            if not resolved:\n                raise ValueError(\"no tags resolved from names\")\n            return {\"tag_ids\": resolved}, \"applied\", None, None\n        tid = tag_name_to_id.get(str(incoming))\n        if tid is None:\n            raise ValueError(f\"tag not found: {incoming}\")\n        return {\"tag_ids\": [int(tid)]}, \"applied\", None, None\n\n    # files (deferred)\n    if board_type == \"files\":\n        return None, \"skipped\", \"files require upload flow (deferred)\", {\"action\": \"attach_files\", \"columnId\": col_id, \"value\": incoming}\n\n    # fallback: pass-through\n    return incoming, \"applied\", None, None\n"
+    }
+  }
+}
