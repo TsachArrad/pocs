@@ -1,0 +1,230 @@
+# Connector JSON Schema for `kata_orchestrator`
+
+You are generating a **connector JSON file** that will be passed to `kata_orchestrator.py` — a Docker-based sandbox orchestrator that runs untrusted Python code inside a container. Your JSON must conform exactly to the following contract.
+
+## Top-Level Structure
+
+```json
+{
+  "auth":                { ... },       // Optional. Object with credentials/secrets.
+  "configurationTypes":  { ... },       // Optional. Describes & validates "configuration" fields.
+  "configuration":       { ... },       // Optional. Runtime settings passed to the code.
+  "requirements":        [ ... ],       // Optional. Python pip packages to install.
+  "runtime":             { ... },       // Optional. Execution controls (entrypoint, limits).
+  "files":               { ... }        // **REQUIRED**. Map of filename → Python source code.
+}
+```
+
+Any extra top-level keys are preserved and forwarded as-is into the container's `/run/connector.json`.
+
+---
+
+## `files` (REQUIRED)
+
+An object mapping **relative file paths** to their **string content**. These files are written to `/run/code/` inside the container.
+
+**Rules:**
+- Keys must be non-empty relative paths (e.g. `"main.py"`, `"lib/utils.py"`)
+- No absolute paths, no `..` traversal
+- Values must be strings (the file content)
+- Subdirectories are created automatically
+- One of these files must be the entrypoint (see `runtime.entryPoint`)
+
+```json
+"files": {
+  "main.py": "import json\nimport os\n\nprint(json.dumps({\"hello\": \"world\"}))\n",
+  "helpers/util.py": "def greet(name):\n    return f'Hello {name}'\n"
+}
+```
+
+---
+
+## `runtime` (Optional)
+
+Controls how the code is executed inside the container.
+
+| Field         | Type    | Default               | Description |
+|---------------|---------|-----------------------|-------------|
+| `entryPoint`  | string  | `"runner_entrypoint.py"` | **Relative file path** to the Python file to execute. Must exist in `files`. This is NOT a shell command — just a filename like `"main.py"` or `"src/app.py"`. |
+| `timeoutMs`   | integer | `60000`               | Wall-clock timeout in milliseconds. |
+| `memoryMb`    | integer | `256`                 | Container memory limit in MB. |
+| `cpus`        | number  | `0.5`                 | CPU limit (e.g. `1`, `0.5`). |
+
+```json
+"runtime": {
+  "entryPoint": "main.py",
+  "timeoutMs": 30000,
+  "memoryMb": 256,
+  "cpus": 1
+}
+```
+
+**CRITICAL:** `entryPoint` is a **file path**, not a command. The orchestrator runs: `python -u /run/code/<entryPoint>`. No CLI arguments are passed to your script.
+
+---
+
+## `requirements` (Optional)
+
+Array of pip package specifiers to install before running the entrypoint.
+
+**Rules:**
+- Each entry must match: `PackageName` or `PackageName==Version`
+- Only alphanumeric, dots, hyphens, and underscores allowed
+- No extras, no URL-based installs, no inequalities (`>=`, `~=`, etc.)
+
+```json
+"requirements": [
+  "requests==2.31.0",
+  "pika==1.3.2"
+]
+```
+
+---
+
+## `auth` (Optional)
+
+Object containing credentials or secrets. Can have any structure. Top-level scalar values are flattened into container environment variables with prefix `AUTH_`:
+
+```json
+"auth": {
+  "apiKey": "sk-abc123",
+  "dbUrl": "postgres://..."
+}
+```
+
+→ Container gets: `AUTH_APIKEY=sk-abc123`, `AUTH_DBURL=postgres://...`
+
+Only top-level scalar values (string, number, boolean, null) are flattened. Nested objects are NOT flattened to env vars but ARE available in `/run/connector.json`.
+
+You can use `{{env:VAR_NAME}}` placeholders in string values — they are resolved from the host environment before execution:
+
+```json
+"auth": {
+  "token": "{{env:MY_SECRET_TOKEN}}"
+}
+```
+
+---
+
+## `configuration` (Optional)
+
+Object containing runtime settings for your code. Any structure is allowed. Top-level scalar values are flattened into container env vars with prefix `CONFIG_`:
+
+```json
+"configuration": {
+  "mode": "queue",
+  "retries": 3
+}
+```
+
+→ Container gets: `CONFIG_MODE=queue`, `CONFIG_RETRIES=3`
+
+Nested objects (like `"queue": {...}`) are NOT flattened to env vars but are available in `/run/connector.json`.
+
+If an `--input` JSON is also provided at runtime, its `configuration` is **shallowly merged** (overrides) into this one.
+
+---
+
+## `configurationTypes` (Optional)
+
+Describes and validates the **fields of `configuration`** using a simple type descriptor format. The orchestrator builds a JSON Schema from this and validates `configuration` against it.
+
+**IMPORTANT:** `configurationTypes` describes the **direct children** of `configuration` — NOT nested sub-fields. Each key in `configurationTypes` must correspond to a key in `configuration`.
+
+Each field descriptor is an object with:
+
+| Property      | Type    | Description |
+|---------------|---------|-------------|
+| `type`        | string  | One of: `"string"`, `"number"`, `"integer"`, `"boolean"`, `"object"`, `"array"`, `"null"`. Use `"string\|null"` for union types. |
+| `required`    | boolean | If `true`, field must exist in `configuration`. |
+| `enum`        | array   | Allowed values (optional). |
+| `default`     | any     | Default value (optional). |
+| `description` | string  | Human-readable description (optional, ignored by validator). |
+
+```json
+"configurationTypes": {
+  "mode": {
+    "type": "string",
+    "required": true,
+    "enum": ["queue", "topic"]
+  },
+  "retries": {
+    "type": "integer",
+    "required": false,
+    "default": 3
+  }
+}
+```
+
+---
+
+## How Your Code Accesses Data at Runtime
+
+Inside the container, your Python entrypoint has:
+
+| What | Where |
+|------|-------|
+| Full connector JSON (all fields) | File: `/run/connector.json` (path also in env `CONNECTOR_JSON_PATH`) |
+| Input JSON (if provided) | File: `/run/input.json` (path also in env `INPUT_JSON_PATH`) |
+| Auth scalars | Env vars: `AUTH_<KEY>` |
+| Config scalars | Env vars: `CONFIG_<KEY>` |
+| Writable directory | `/workspace` (1GB tmpfs) |
+| Temp directory | `/tmp` (64MB tmpfs) |
+| Code files | `/run/code/` (read-only) |
+
+**Recommended pattern for reading config:**
+
+```python
+import json, os
+
+config_path = os.environ.get("CONNECTOR_JSON_PATH", "/run/connector.json")
+with open(config_path) as f:
+    connector = json.load(f)
+
+auth = connector.get("auth", {})
+config = connector.get("configuration", {})
+```
+
+---
+
+## Output Contract
+
+- Your code's **stdout** is captured as the result. Ideally print **exactly one JSON object** to stdout.
+- **stderr** is captured as logs (visible on error).
+- Exit code `0` = success, anything else = failure.
+
+---
+
+## Complete Minimal Example
+
+```json
+{
+  "files": {
+    "main.py": "import json\nimport os\n\npath = os.environ.get('CONNECTOR_JSON_PATH', '/run/connector.json')\nwith open(path) as f:\n    data = json.load(f)\n\nresult = {'message': 'Hello from sandbox', 'config': data.get('configuration', {})}\nprint(json.dumps(result))\n"
+  },
+  "runtime": {
+    "entryPoint": "main.py",
+    "timeoutMs": 10000,
+    "memoryMb": 128,
+    "cpus": 0.5
+  }
+}
+```
+
+
+
+Prompt
+
+You are expert at **** 
+Please read **** doce 
+{detailed and appropriate prompt describing what to acheive}
+
+please follow below info to create the right schema
+
+
+
+-------------------------
+after that, need to ask the ai if needs to change somehing in the derived json , it will make sure not to change the code of the executor but the json himself
+make sure the value wont come from env file but from the json only
+
+than return it to the client
