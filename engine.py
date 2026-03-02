@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-kata_orchestrator.py
+docker_orchestrator.py
 
 Production-oriented CLI orchestrator for executing untrusted connector code inside
-Kata Containers via Docker runtime `kata-runtime`.
+regular Docker (NOT Kata), with Internet access.
 
 Core contract:
 - Accepts and forwards top-level connector nodes as-is (including dynamic structures)
@@ -12,16 +12,15 @@ Core contract:
 - Resolves {{env:VAR_NAME}} placeholders recursively in connector strings
 - Merges input.configuration shallowly into connector.configuration before validation/forwarding
 - Validates merged configuration using JSON Schema generated from configurationTypes
-- Runs code in container with strict runtime controls and seccomp profile
+- Runs code in container with strict runtime controls
 - Prints exactly one JSON object to stdout as final result
 
 Prerequisites:
 - Docker installed and reachable in PATH
-- Kata runtime available as `kata-runtime`
-- Image available/pullable: `python:3.12-slim`
+- Image available/pullable: python:3.12-slim
 
 Example:
-  python kata_orchestrator.py connector.json --input input.json --strict
+  python docker_orchestrator.py connector.json --input input.json --strict
 """
 
 from __future__ import annotations
@@ -42,19 +41,18 @@ from typing import Any
 
 try:
     from jsonschema import Draft202012Validator
-    from jsonschema.exceptions import ValidationError
 except Exception:
     Draft202012Validator = None  # type: ignore[assignment]
-    ValidationError = Exception  # type: ignore[assignment]
 
 
 RE_REQUIREMENT = re.compile(r"^[A-Za-z0-9._-]+(==[A-Za-z0-9._-]+)?$")
 RE_PLACEHOLDER = re.compile(r"\{\{env:([A-Z0-9_]+)\}\}")
 MAX_LOG_BYTES = 1024 * 1024  # 1MB
+
 DEFAULT_TIMEOUT_MS = 60000
 DEFAULT_MEMORY_MB = 256
 DEFAULT_CPUS = 0.5
-DEFAULT_PIDS_LIMIT = 8
+DEFAULT_PIDS_LIMIT = 64
 DEFAULT_ENTRYPOINT = "runner_entrypoint.py"
 DEFAULT_IMAGE = "python:3.12-slim"
 
@@ -118,10 +116,9 @@ class SuspiciousPythonVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run untrusted connector files inside Kata Containers securely."
+        description="Run untrusted connector files inside Docker securely (with Internet)."
     )
     parser.add_argument(
         "connector",
@@ -151,7 +148,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-
 def read_text_from_source(path_or_dash: str, stdin_cache: str | None) -> tuple[str, str | None]:
     if path_or_dash == "-":
         if stdin_cache is not None:
@@ -172,7 +168,6 @@ def read_text_from_source(path_or_dash: str, stdin_cache: str | None) -> tuple[s
         raise OrchestratorError(f"failed reading file {path_or_dash}: {exc}") from exc
 
 
-
 def parse_json_payload(payload_text: str, source_name: str) -> dict[str, Any]:
     try:
         parsed = json.loads(payload_text)
@@ -183,9 +178,9 @@ def parse_json_payload(payload_text: str, source_name: str) -> dict[str, Any]:
     return parsed
 
 
-
 def resolve_env_placeholders(value: Any) -> Any:
     if isinstance(value, str):
+
         def repl(match: re.Match[str]) -> str:
             var_name = match.group(1)
             env_value = os.getenv(var_name)
@@ -202,7 +197,6 @@ def resolve_env_placeholders(value: Any) -> Any:
         return {k: resolve_env_placeholders(v) for k, v in value.items()}
 
     return value
-
 
 
 def merge_configuration(connector: dict[str, Any], input_obj: dict[str, Any] | None) -> dict[str, Any]:
@@ -224,7 +218,6 @@ def merge_configuration(connector: dict[str, Any], input_obj: dict[str, Any] | N
 
     merged["configuration"] = merged_config
     return merged
-
 
 
 def validate_connector_shape(connector: dict[str, Any]) -> None:
@@ -258,19 +251,7 @@ def validate_connector_shape(connector: dict[str, Any]) -> None:
         raise OrchestratorError("connector.runtime must be an object when present")
 
 
-
 def _normalize_type_descriptor(type_value: Any) -> dict[str, Any]:
-    """
-    Normalize a loose type descriptor from configurationTypes into JSON Schema fragment.
-
-    Supported mappings:
-      - string -> {"type":"string"}
-      - number -> {"type":"number"}
-      - boolean -> {"type":"boolean"}
-      - array -> {"type":"array"}
-      - object/dictionary -> {"type":"object"}
-      - union via list or pipe-delimited string -> {"type":[...]} with mapped entries
-    """
     map_atomic = {
         "string": "string",
         "number": "number",
@@ -307,9 +288,7 @@ def _normalize_type_descriptor(type_value: Any) -> dict[str, Any]:
     return {"type": "object"}
 
 
-
 def build_configuration_schema(configuration_types: Any) -> dict[str, Any]:
-    """Build JSON Schema for connector.configuration from connector.configurationTypes."""
     schema: dict[str, Any] = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -320,9 +299,7 @@ def build_configuration_schema(configuration_types: Any) -> dict[str, Any]:
 
     if configuration_types is None:
         return schema
-
     if not isinstance(configuration_types, dict):
-        # Be permissive about dynamic data shape; skip schema details if malformed.
         return schema
 
     properties: dict[str, Any] = {}
@@ -335,8 +312,6 @@ def build_configuration_schema(configuration_types: Any) -> dict[str, Any]:
         if isinstance(descriptor, dict):
             type_fragment = _normalize_type_descriptor(descriptor.get("type", "object"))
             field_schema: dict[str, Any] = dict(type_fragment)
-
-            # Optional pass-through of enum/default where present and JSON-compatible.
             if "enum" in descriptor and isinstance(descriptor["enum"], list):
                 field_schema["enum"] = descriptor["enum"]
             if "default" in descriptor:
@@ -345,7 +320,7 @@ def build_configuration_schema(configuration_types: Any) -> dict[str, Any]:
             properties[field_name] = field_schema
             if bool(descriptor.get("required")):
                 required.append(field_name)
-        elif isinstance(descriptor, str) or isinstance(descriptor, list):
+        elif isinstance(descriptor, (str, list)):
             properties[field_name] = _normalize_type_descriptor(descriptor)
         else:
             properties[field_name] = {"type": "object"}
@@ -355,10 +330,7 @@ def build_configuration_schema(configuration_types: Any) -> dict[str, Any]:
     return schema
 
 
-
-def validate_configuration(
-    merged_configuration: dict[str, Any], configuration_types: Any
-) -> None:
+def validate_configuration(merged_configuration: dict[str, Any], configuration_types: Any) -> None:
     if Draft202012Validator is None:
         raise OrchestratorError(
             "jsonschema is required but not installed. Install with: pip install jsonschema"
@@ -375,15 +347,13 @@ def validate_configuration(
     raise OrchestratorError(f"configuration validation error at {loc}: {first.message}")
 
 
-
 def create_run_dirs(tmpdir: str | None) -> tuple[str, Path, Path]:
     run_id = uuid.uuid4().hex
     base = Path(tmpdir).resolve() if tmpdir else Path(tempfile.gettempdir())
-    run_dir = Path(tempfile.mkdtemp(prefix=f"kata_run_{run_id}_", dir=str(base)))
+    run_dir = Path(tempfile.mkdtemp(prefix=f"docker_run_{run_id}_", dir=str(base)))
     code_dir = run_dir / "code"
     code_dir.mkdir(parents=True, exist_ok=True)
     return run_id, run_dir, code_dir
-
 
 
 def _safe_rel_path(path_str: str) -> Path:
@@ -402,14 +372,12 @@ def _safe_rel_path(path_str: str) -> Path:
     return Path(*normalized_parts)
 
 
-
 def write_connector_files(code_dir: Path, files_map: dict[str, str]) -> None:
     for rel_path_str, content in files_map.items():
         rel = _safe_rel_path(rel_path_str)
         dest = code_dir / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
-
 
 
 def write_requirements_file(code_dir: Path, requirements: list[str] | None) -> Path | None:
@@ -429,7 +397,6 @@ def write_requirements_file(code_dir: Path, requirements: list[str] | None) -> P
     return req_path
 
 
-
 def detect_entrypoint(connector: dict[str, Any], code_dir: Path) -> str:
     runtime = connector.get("runtime") or {}
     entrypoint = runtime.get("entryPoint", DEFAULT_ENTRYPOINT)
@@ -443,64 +410,20 @@ def detect_entrypoint(connector: dict[str, Any], code_dir: Path) -> str:
     return rel.as_posix()
 
 
-
-def generate_seccomp_profile(run_dir: Path) -> Path:
-    seccomp = {
-        "defaultAction": "SCMP_ACT_ERRNO",
-        "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"],
-        "archMap": [
-            {
-                "architecture": "SCMP_ARCH_X86_64",
-                "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"],
-            }
-        ],
-        "syscalls": [
-            {
-                "names": ["execve", "execveat"],
-                "action": "SCMP_ACT_ALLOW",
-                "args": [],
-                "comment": "Allow process execution only",
-                "includes": {},
-                "excludes": {},
-            },
-            {
-                "names": [
-                    "fork",
-                    "vfork",
-                    "clone",
-                    "clone3",
-                    "ptrace",
-                    "process_vm_readv",
-                    "process_vm_writev",
-                    "mount",
-                    "setns",
-                    "bpf",
-                    "init_module",
-                    "delete_module",
-                    "reboot",
-                    "open_by_handle_at",
-                ],
-                "action": "SCMP_ACT_ERRNO",
-                "args": [],
-                "comment": "Explicitly blocked high-risk syscalls",
-                "includes": {},
-                "excludes": {},
-            },
-        ],
-    }
-    seccomp_path = run_dir / "seccomp.json"
-    seccomp_path.write_text(json.dumps(seccomp, indent=2), encoding="utf-8")
-    return seccomp_path
-
-
-
 def write_json_file(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def make_world_readable(directory: Path) -> None:
+    """Recursively set permissions so non-root container users can read all files."""
+    for root, dirs, files in os.walk(directory):
+        root_path = Path(root)
+        os.chmod(root_path, 0o755)
+        for f in files:
+            os.chmod(root_path / f, 0o644)
+
 
 def _flatten_env(prefix: str, obj: Any) -> dict[str, str]:
-    """Flatten only scalar values for convenience env vars; avoids arbitrary deep expansion."""
     out: dict[str, str] = {}
     if not isinstance(obj, dict):
         return out
@@ -514,42 +437,49 @@ def _flatten_env(prefix: str, obj: Any) -> dict[str, str]:
     return out
 
 
-
 def build_bootstrap_script(run_dir: Path, entrypoint_rel: str) -> Path:
     script = f'''#!/usr/bin/env python3
+import faulthandler
 import os
 import subprocess
 import sys
+import traceback
 from pathlib import Path
+
+faulthandler.enable()
 
 code_dir = Path('/run/code')
 requirements_path = code_dir / 'requirements.txt'
 entrypoint = code_dir / {entrypoint_rel!r}
 
+# Make imports like "import app" work reliably
+env = dict(os.environ)
+env["PYTHONPATH"] = str(code_dir) + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+
 if requirements_path.exists():
     pip_cmd = [
-        sys.executable,
-        '-m',
-        'pip',
-        'install',
+        sys.executable, '-m', 'pip', 'install',
         '--user',
         '--no-cache-dir',
         '--disable-pip-version-check',
-        '-r',
-        str(requirements_path),
+        '-r', str(requirements_path),
     ]
-    pip_proc = subprocess.run(pip_cmd)
+    pip_proc = subprocess.run(pip_cmd, cwd=str(code_dir), env=env, stdout=sys.stderr, stderr=sys.stderr)
     if pip_proc.returncode != 0:
+        print(f"[bootstrap] pip install failed with code {{pip_proc.returncode}}", file=sys.stderr)
         sys.exit(pip_proc.returncode)
 
-run_cmd = [sys.executable, str(entrypoint)]
-proc = subprocess.run(run_cmd)
-sys.exit(proc.returncode)
+try:
+    run_cmd = [sys.executable, '-u', str(entrypoint)]
+    proc = subprocess.run(run_cmd, cwd=str(code_dir), env=env)
+    sys.exit(proc.returncode)
+except Exception:
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
 '''
     bootstrap_path = run_dir / "bootstrap.py"
     bootstrap_path.write_text(script, encoding="utf-8")
     return bootstrap_path
-
 
 
 def truncate_text(data: bytes) -> str:
@@ -558,6 +488,34 @@ def truncate_text(data: bytes) -> str:
     head = data[:MAX_LOG_BYTES]
     return head.decode("utf-8", errors="replace") + "\n...[truncated]"
 
+def docker_network_create(run_id: str) -> str:
+    """
+    Create a per-run user-defined bridge network.
+    User-defined networks provide container DNS and isolate from default 'bridge' network.
+    """
+    net_name = f"sandbox-net-{run_id[:12]}"
+
+    # Create network
+    proc = subprocess.run(
+        ["docker", "network", "create", "--driver", "bridge", net_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise OrchestratorError(f"failed to create docker network {net_name}: {proc.stderr.strip()}")
+
+    return net_name
+
+
+def docker_network_remove(net_name: str) -> None:
+    # Best-effort cleanup
+    subprocess.run(
+        ["docker", "network", "rm", net_name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
 
 
 def scan_python_files(code_dir: Path, strict: bool) -> tuple[list[str], list[str]]:
@@ -580,57 +538,58 @@ def scan_python_files(code_dir: Path, strict: bool) -> tuple[list[str], list[str
     return result.findings, parse_errors
 
 
-
 def build_docker_command(
     run_id: str,
     run_dir: Path,
-    seccomp_path: Path,
+    tenant_dir: Path,
     timeout_ms: int,
     memory_mb: int,
     cpus: float,
     pids_limit: int,
     has_input: bool,
     env_flattened: dict[str, str],
+    network_name: str,              # <-- הוסף
     image: str = DEFAULT_IMAGE,
 ) -> list[str]:
-    container_name = f"kata-{run_id[:12]}"
+    container_name = f"sandbox-{run_id[:12]}"
 
     cmd = [
-        "docker",
-        "run",
-        "--rm",
-        "--name",
-        container_name,
-        "--runtime=kata",
-        "--read-only",
-        "--tmpfs",
-        "/workspace:size=1G,mode=1777",
-        "--mount",
-        f"type=bind,src={run_dir},dst=/run,readonly",
-        "--user",
-        "65532:65532",
-        "--cap-drop=ALL",
-        "--security-opt",
-        "no-new-privileges",
-        "--pids-limit",
-        str(pids_limit),
-        "--memory",
-        f"{memory_mb}m",
-        "--cpus",
-        str(cpus),
-        "--security-opt",
-        f"seccomp={seccomp_path}",
-        "-e",
-        "HOME=/workspace",
-        "-e",
-        "PYTHONUSERBASE=/workspace/.local",
-        "-e",
-        "PATH=/workspace/.local/bin:/usr/local/bin:/usr/bin:/bin",
-        "-e",
-        "PYTHONDONTWRITEBYTECODE=1",
-        "-e",
-        "CONNECTOR_JSON_PATH=/run/connector.json",
-    ]
+    "docker", "run",
+"--rm",
+"--name", container_name,
+
+"--read-only",
+"--network", network_name,
+
+
+"--init",
+
+"--tmpfs", "/tmp:size=64m,mode=1777,noexec,nosuid,nodev",
+
+"--mount", f"type=bind,src={str(tenant_dir)},dst=/workspace",
+"--mount", f"type=bind,src={run_dir},dst=/run,readonly",
+
+"--user", "65532:65532",
+
+"--cap-drop=ALL",
+"--security-opt", "no-new-privileges=true",
+
+"--pids-limit", str(pids_limit),
+"--memory", f"{memory_mb}m",
+"--cpus", str(cpus),
+
+"-e", "HOME=/workspace",
+"-e", "PYTHONUSERBASE=/workspace/.local",
+"-e", "PATH=/workspace/.local/bin:/usr/local/bin:/usr/bin:/bin",
+"-e", "PYTHONDONTWRITEBYTECODE=1",
+"-e", "CONNECTOR_JSON_PATH=/run/connector.json",
+
+"--security-opt", "apparmor=docker-default",
+"--ipc=none",
+"--ulimit", "nofile=256:256",
+"--ulimit", "nproc=64:64",
+"--runtime=runsc",
+]
 
     if has_input:
         cmd.extend(["-e", "INPUT_JSON_PATH=/run/input.json"])
@@ -638,34 +597,19 @@ def build_docker_command(
     for env_k, env_v in env_flattened.items():
         cmd.extend(["-e", f"{env_k}={env_v}"])
 
-    cmd.extend([
-        image,
-        "python",
-        "/run/bootstrap.py",
-    ])
+    cmd.extend([image, "python", "-u", "/run/bootstrap.py"])
 
-    # timeout_ms argument retained for call-site parity with runtime contract.
-    _ = timeout_ms
+    _ = timeout_ms  # retained for call-site parity
     return cmd
 
 
-
-def run_container_with_timeout(
-    cmd: list[str],
-    run_id: str,
-    timeout_ms: int,
-) -> tuple[int, str, str]:
-    container_name = f"kata-{run_id[:12]}"
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+def run_container_with_timeout(cmd: list[str], run_id: str, timeout_ms: int) -> tuple[int, str, str]:
+    container_name = f"sandbox-{run_id[:12]}"
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     try:
         stdout_b, stderr_b = proc.communicate(timeout=timeout_ms / 1000)
     except subprocess.TimeoutExpired as exc:
-        # Best effort kill by container name, then local process.
         try:
             subprocess.run(
                 ["docker", "kill", container_name],
@@ -676,13 +620,10 @@ def run_container_with_timeout(
         finally:
             proc.kill()
             stdout_b, stderr_b = proc.communicate()
-        raise TimeoutError(
-            f"sandbox exceeded timeout of {timeout_ms} ms"
-        ) from exc
+        raise TimeoutError(f"sandbox exceeded timeout of {timeout_ms} ms") from exc
 
     exit_code = proc.returncode if proc.returncode is not None else 1
     return exit_code, truncate_text(stdout_b), truncate_text(stderr_b)
-
 
 
 def parse_result_from_stdout(stdout: str) -> Any:
@@ -700,11 +641,9 @@ def parse_result_from_stdout(stdout: str) -> Any:
     return stdout
 
 
-
 def json_print(payload: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(payload, ensure_ascii=False))
     sys.stdout.write("\n")
-
 
 
 def main() -> int:
@@ -722,7 +661,7 @@ def main() -> int:
     stderr_log = ""
     exit_code: int | None = None
     warnings: list[str] = []
-
+    network_name: str | None = None
     try:
         if args.connector == "-" and args.input_path == "-":
             raise OrchestratorError("connector and --input cannot both use stdin ('-')")
@@ -747,6 +686,15 @@ def main() -> int:
         )
 
         run_id, run_dir, code_dir = create_run_dirs(args.tmpdir)
+        network_name = docker_network_create(run_id)
+        # Create per-run host workspace (the only RW path inside the container)
+        workspace_dir = run_dir / "workspace"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+                # לא עושים chown (דורש root).
+        # 1777 = world-writable + sticky bit (כמו /tmp):
+        # מאפשר ל-UID 65532 לכתוב, ועדיין מונע ממישהו אחר למחוק קבצים שהוא לא יצר.
+        os.chmod(workspace_dir, 0o1777)
 
         files_map = merged_connector["files"]
         write_connector_files(code_dir, files_map)
@@ -763,8 +711,11 @@ def main() -> int:
         if input_obj is not None:
             write_json_file(run_dir / "input.json", input_obj)
 
-        seccomp_path = generate_seccomp_profile(run_dir)
         build_bootstrap_script(run_dir, entrypoint_rel)
+
+        # Ensure all files are readable by the unprivileged container user (65532).
+        make_world_readable(run_dir)
+        os.chmod(workspace_dir, 0o1777)
 
         runtime = merged_connector.get("runtime") if isinstance(merged_connector.get("runtime"), dict) else {}
         if runtime:
@@ -786,13 +737,14 @@ def main() -> int:
         docker_cmd = build_docker_command(
             run_id=run_id,
             run_dir=run_dir,
-            seccomp_path=seccomp_path,
+            tenant_dir=workspace_dir,
             timeout_ms=timeout_ms,
             memory_mb=memory_mb,
             cpus=cpus,
             pids_limit=pids_limit,
             has_input=input_obj is not None,
             env_flattened=env_flattened,
+            network_name=network_name,
         )
 
         exit_code, stdout_log, stderr_log = run_container_with_timeout(
@@ -853,10 +805,7 @@ def main() -> int:
                 "memory_limit_mb": memory_mb,
                 "pids_limit": pids_limit,
             },
-            "logs": {
-                "stdout": stdout_log,
-                "stderr": stderr_log,
-            },
+            "logs": {"stdout": stdout_log, "stderr": stderr_log},
         }
         if warnings:
             out["meta"]["warnings"] = warnings
@@ -875,10 +824,7 @@ def main() -> int:
                 "memory_limit_mb": memory_mb,
                 "pids_limit": pids_limit,
             },
-            "logs": {
-                "stdout": stdout_log,
-                "stderr": stderr_log,
-            },
+            "logs": {"stdout": stdout_log, "stderr": stderr_log},
         }
         if warnings:
             out["meta"]["warnings"] = warnings
@@ -897,10 +843,7 @@ def main() -> int:
                 "memory_limit_mb": memory_mb,
                 "pids_limit": pids_limit,
             },
-            "logs": {
-                "stdout": stdout_log,
-                "stderr": stderr_log,
-            },
+            "logs": {"stdout": stdout_log, "stderr": stderr_log},
         }
         if warnings:
             out["meta"]["warnings"] = warnings
@@ -908,6 +851,12 @@ def main() -> int:
         return 1
 
     finally:
+        if run_dir is not None and not args.keep_run_dir:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        
+        if network_name is not None:
+            docker_network_remove(network_name)
+
         if run_dir is not None and not args.keep_run_dir:
             shutil.rmtree(run_dir, ignore_errors=True)
 
