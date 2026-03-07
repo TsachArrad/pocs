@@ -128,7 +128,7 @@ def _extract_json_from_text(text: str) -> dict[str, Any] | None:
 
 
 def _get_client() -> AzureOpenAI:
-    api_key = '{{env:AZURE}}'
+    api_key = 'DAMxRHeLOWlar0mJcxBS0McuJw54EMcHYwm0MNVboV8l6vFIkB3CJQQJ99BKACF24PCXJ3w3AAAAACOGO7qx'
     endpoint = 'https://genor-prod-uaenorth-oai.cognitiveservices.azure.com'
     api_version = '2024-04-01-preview'
 

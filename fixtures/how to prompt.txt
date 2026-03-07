@@ -1,0 +1,155 @@
+Connector JSON Schema
+
+You are generating a **connector JSON file** 
+
+All of the top level json us REQUIRED!
+
+```json
+{
+  "auth":                { ... },       //  Object with credentials/secrets.
+  "configurationTypes":  { ... },       //  Describes & validates "configuration" fields.
+  "configuration":       { ... },       //  Runtime settings passed to the code.
+  "requirements":        [ ... ],       //  Python pip packages to install.
+  "runtime":             { ... },       //  Execution controls (entrypoint, limits).
+  "files":               { ... }        //  Map of filename → Python source code.
+}
+```
+
+Any extra top-level keys are preserved and forwarded as-is into the container's `/run/connector.json`.
+
+---
+
+`files` (REQUIRED)
+
+An object mapping **relative file paths** to their **string content**. These files are written to `/run/code/` inside the container.
+
+**Rules:**
+- Keys must be non-empty relative paths (e.g. `"main.py"`, `"lib/utils.py"`)
+- No absolute paths, no `..` traversal
+- Values must be strings (the file content)
+- Subdirectories are created automatically
+- One of these files must be the entrypoint (see `runtime.entryPoint`)
+-if needs you can add dew keys but they must have relation between to be operated as part of the docker
+- each key that will represent  code will be written in one line (mandatory!)
+
+```json
+"files": {
+  "main.py": "import json\nimport os\n\nprint(json.dumps({\"hello\": \"world\"}))\n",
+  "helpers/util.py": "def greet(name):\n    return f'Hello {name}'\n"
+}
+```
+
+---
+
+`runtime` (Optional)
+
+Controls how the code is executed inside the container.
+
+| Field         | Type    | Default               | Description |
+|---------------|---------|-----------------------|-------------|
+| `entryPoint`  | string  | `"runner_entrypoint.py"` | **Relative file path** to the Python file to execute. Must exist in `files`. This is NOT a shell command — just a filename like `"main.py"` or `"src/app.py"`. |
+| `timeoutMs`   | integer | `60000`               | Wall-clock timeout in milliseconds. |
+| `memoryMb`    | integer | `256`                 | Container memory limit in MB. |
+| `cpus`        | number  | `0.5`                 | CPU limit (e.g. `1`, `0.5`). |
+
+```json
+"runtime": {
+  "entryPoint": "main.py",
+  "timeoutMs": 30000,
+  "memoryMb": 256,
+  "cpus": 1
+}
+```
+
+**CRITICAL:** `entryPoint` is a **file path**, not a command. The orchestrator runs: `python -u /run/code/<entryPoint>`. No CLI arguments are passed to your script.
+
+---
+
+`requirements` (required)
+
+Array of pip package specifiers to install before running the entrypoint.
+
+**Rules:**
+- Each entry must match: `PackageName` or `PackageName==Version`
+- Only alphanumeric, dots, hyphens, and underscores allowed
+- No extras, no URL-based installs, no inequalities (`>=`, `~=`, etc.)
+
+```json
+"requirements": [
+  "requests==2.31.0",
+  "pika==1.3.2"
+]
+```
+
+---
+
+`auth` (required)
+
+Object containing credentials or secrets. Can have any structure. Top-level scalar values are flattened into container environment variables with prefix `AUTH_`:
+
+```json
+"auth": {
+  "apiKey": "sk-abc123",
+  "dbUrl": "postgres://..."
+}
+```
+
+→ Container gets: `AUTH_APIKEY=sk-abc123`, `AUTH_DBURL=postgres://...`
+
+Only top-level scalar values (string, number, boolean, null) are flattened. Nested objects are NOT flattened to env vars but ARE available in `/run/connector.json`.
+
+You cannot use `{{env:VAR_NAME}}` placeholders
+
+
+---
+
+ `configuration` (required)
+
+Object containing runtime settings for your code. Any structure is allowed. Top-level scalar values are flattened into container env vars with prefix `CONFIG_`:
+
+```json
+"configuration": {
+  "mode": "queue",
+  "retries": 3
+}
+```
+
+→ Container gets: `CONFIG_MODE=queue`, `CONFIG_RETRIES=3`
+
+Nested objects (like `"queue": {...}`) are NOT flattened to env vars but are available in `/run/connector.json`.
+
+If an `--input` JSON is also provided at runtime, its `configuration` is **shallowly merged** (overrides) into this one.
+
+---
+
+ `configurationTypes` (required)
+
+Describes and validates the **fields of `configuration`** using a simple type descriptor format. The orchestrator builds a JSON Schema from this and validates `configuration` against it.
+
+**IMPORTANT:** `configurationTypes` describes the **direct children** of `configuration` — NOT nested sub-fields. Each key in `configurationTypes` must correspond to a key in `configuration`.
+
+Each field descriptor is an object with:
+
+| Property      | Type    | Description |
+|---------------|---------|-------------|
+| `type`        | string  | One of: `"string"`, `"number"`, `"integer"`, `"boolean"`, `"object"`, `"array"`, `"null"`. Use `"string\|null"` for union types. |
+| `required`    | boolean | If `true`, field must exist in `configuration`. |
+| `enum`        | array   | Allowed values (optional). |
+| `default`     | any     | Default value (optional). |
+| `description` | string  | Human-readable description (optional, ignored by validator). |
+
+```json
+"configurationTypes": {
+  "mode": {
+    "type": "string",
+    "required": true,
+    "enum": ["queue", "topic"]
+  },
+  "retries": {
+    "type": "integer",
+    "required": false,
+    "default": 3
+  }
+}
+```
+
