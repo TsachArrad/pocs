@@ -45,7 +45,7 @@ function Validation() {
             disabled={loading}
           />
           <small className="helper-text">
-            The connector will be fetched from: https://localhost:62925/api/Connector/get-file/[filename]
+            The connector will be fetched from: https://uploaderbe-b4dbh9eec3hmh5ep.westeurope-01.azurewebsites.net/api/Connector/get-file/[filename]
           </small>
         </div>
 

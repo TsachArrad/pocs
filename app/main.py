@@ -602,7 +602,7 @@ def health() -> dict[str, str]:
 
 @app.get("/get-file/{file_name}")
 def get_file(file_name: str) -> dict[str, Any]:
-    url = f"https://localhost:62925/api/Connector/{file_name}"
+    url = f"https://uploaderbe-b4dbh9eec3hmh5ep.westeurope-01.azurewebsites.net/api/Connector/get-file/{file_name}"
     try:
         resp = http_requests.get(url, verify=False, timeout=30)
         resp.raise_for_status()
@@ -681,7 +681,7 @@ class AddToStorageRequest(BaseModel):
 
 @app.post("/add-to-storage")
 def add_to_storage(payload: AddToStorageRequest) -> dict[str, Any]:
-    url = "https://localhost:62925/api/Connector/add-to-storage"
+    url = "https://uploaderbe-b4dbh9eec3hmh5ep.westeurope-01.azurewebsites.net/api/Connector/add-to-storage"
     try:
         resp = http_requests.post(
             url,
@@ -715,13 +715,13 @@ def execute_connector(payload: ExecuteConnectorRequest) -> ExecuteConnectorRespo
 @app.get("/validate-connector/{file_name:path}")
 def validate_connector(file_name: str) -> dict[str, Any]:
     """
-    1. Fetch connector JSON from https://localhost:62925/api/Connector/get-file/{file_name}
+    1. Fetch connector JSON from https://uploaderbe-b4dbh9eec3hmh5ep.westeurope-01.azurewebsites.net/api/Connector/get-file/{file_name}
     2. Validate it using engine.py validators
     3. Return validation result
     """
     # Step 1: Fetch the connector JSON
     print(f"Fetching connector JSON for validation: {file_name}")
-    url = f"https://localhost:62925/api/Connector/get-file/{file_name}"
+    url = f"https://uploaderbe-b4dbh9eec3hmh5ep.westeurope-01.azurewebsites.net/api/Connector/get-file/{file_name}"
     try:
         resp = http_requests.get(url, verify=False, timeout=600)
         resp.raise_for_status()
@@ -759,14 +759,14 @@ def validate_connector(file_name: str) -> dict[str, Any]:
 @app.get("/run-engine/{file_name:path}")
 def run_engine(file_name: str) -> dict[str, Any]:
     """
-    1. Fetch connector JSON from https://localhost:62925/api/Connector/{file_name}
+    1. Fetch connector JSON from https://uploaderbe-b4dbh9eec3hmh5ep.westeurope-01.azurewebsites.net/api/Connector/{file_name}
     2. Write it to a temp file
     3. Run: python engine.py <temp_file>
     4. Return engine.py's JSON output
     """
     # Step 1: Fetch the connector JSON
     print(f"Fetching connector JSON for file: {file_name}")
-    url = f"https://localhost:62925/api/Connector/get-file/{file_name}"
+    url = f"https://uploaderbe-b4dbh9eec3hmh5ep.westeurope-01.azurewebsites.net/api/Connector/get-file/{file_name}"
     try:
         resp = http_requests.get(url, verify=False, timeout=600)
         resp.raise_for_status()
